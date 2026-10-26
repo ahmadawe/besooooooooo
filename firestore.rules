@@ -1,0 +1,73 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return signedIn()
+        && request.auth.token.firebase.sign_in_provider == 'password'
+        && exists(/databases/$(database)/documents/adminUsers/$(request.auth.uid))
+        && get(/databases/$(database)/documents/adminUsers/$(request.auth.uid)).data.enabled == true;
+    }
+
+    match /adminUsers/{uid} {
+      allow get: if signedIn() && request.auth.uid == uid;
+      allow list, create, update, delete: if false;
+    }
+
+    match /demoSubmissions/{submissionId} {
+      allow create: if signedIn()
+        && request.auth.token.firebase.sign_in_provider == 'anonymous'
+        && request.resource.data.ownerUid == request.auth.uid
+        && request.resource.data.keys().hasOnly([
+          'id', 'ownerUid', 'participantNumber', 'couponReference',
+          'couponCode', 'couponStatus', 'status', 'createdAt'
+        ])
+        && request.resource.data.id == submissionId
+        && request.resource.data.participantNumber is string
+        && request.resource.data.participantNumber.size() > 0
+        && request.resource.data.participantNumber.size() <= 40
+        && request.resource.data.couponReference is string
+        && request.resource.data.couponReference.size() > 0
+        && request.resource.data.couponReference.size() <= 40
+        && request.resource.data.couponCode == ''
+        && request.resource.data.couponStatus == 'not_submitted'
+        && request.resource.data.status == 'pending'
+        && request.resource.data.createdAt is string;
+
+      allow get: if isAdmin()
+        || (signedIn() && resource.data.ownerUid == request.auth.uid);
+      allow list: if isAdmin();
+
+      // First review: only the admin may accept/reject the initial request.
+      allow update: if isAdmin()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status'])
+        && resource.data.status == 'pending'
+        && request.resource.data.status in ['accepted', 'rejected'];
+
+      // Second review: only the admin may accept/reject a submitted demo number.
+      allow update: if isAdmin()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['couponStatus'])
+        && resource.data.status == 'accepted'
+        && resource.data.couponStatus == 'pending'
+        && request.resource.data.couponStatus in ['accepted', 'rejected'];
+
+      // The owner can add/resubmit a fake number only to their accepted record.
+      allow update: if signedIn()
+        && request.auth.token.firebase.sign_in_provider == 'anonymous'
+        && resource.data.ownerUid == request.auth.uid
+        && resource.data.status == 'accepted'
+        && (!resource.data.keys().hasAny(['couponStatus'])
+          || resource.data.couponStatus in ['not_submitted', 'rejected'])
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['couponCode', 'couponStatus'])
+        && request.resource.data.diff(resource.data).affectedKeys().hasAll(['couponCode', 'couponStatus'])
+        && request.resource.data.couponCode is string
+        && request.resource.data.couponCode.matches('^[0-9]{6}$')
+        && request.resource.data.couponStatus == 'pending';
+
+      allow delete: if false;
+    }
+  }
+}
